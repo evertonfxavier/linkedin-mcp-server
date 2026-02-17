@@ -21,7 +21,7 @@ def patch_tool_deps(monkeypatch):
     mock_browser = MagicMock()
     mock_browser.page = MagicMock()
 
-    for module in ["person", "company", "job"]:
+    for module in ["person", "company", "job", "post"]:
         monkeypatch.setattr(
             f"linkedin_mcp_server.tools.{module}.ensure_authenticated", AsyncMock()
         )
@@ -40,6 +40,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_company = AsyncMock(return_value=scrape_result)
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
+    mock.search_posts = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(return_value="some text")
     return mock
 
@@ -218,3 +219,82 @@ class TestJobTools:
         tool_fn = await get_tool_fn(mcp, "search_jobs")
         result = await tool_fn("python", mock_context, location="Remote")
         assert "search_results" in result["sections"]
+
+
+class TestPostTools:
+    async def test_search_posts(self, mock_context, patch_tool_deps, monkeypatch):
+        expected = {
+            "url": "https://www.linkedin.com/search/results/content/?keywords=React",
+            "sections": {"posts": "Post 1\nPost 2"},
+            "pages_visited": [
+                "https://www.linkedin.com/search/results/content/?keywords=React"
+            ],
+            "sections_requested": ["posts"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.post.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
+        )
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_posts")
+        result = await tool_fn("React", mock_context)
+        assert "posts" in result["sections"]
+        assert result["sections_requested"] == ["posts"]
+
+    async def test_search_posts_with_filters(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        """Verify date_posted and sort_by parameters are passed through."""
+        expected = {
+            "url": "https://www.linkedin.com/search/results/content/?keywords=React",
+            "sections": {"posts": "Job Post 1\nJob Post 2"},
+            "pages_visited": [
+                "https://www.linkedin.com/search/results/content/?keywords=React"
+            ],
+            "sections_requested": ["posts"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.post.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
+        )
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_posts")
+        result = await tool_fn(
+            '"React" AND ("Pleno" OR "Mid")',
+            mock_context,
+            date_posted="past-24h",
+            sort_by="date_posted",
+        )
+        assert "posts" in result["sections"]
+        mock_extractor.search_posts.assert_awaited_once_with(
+            '"React" AND ("Pleno" OR "Mid")', "past-24h", "date_posted"
+        )
+
+    async def test_search_posts_error(self, mock_context, monkeypatch):
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.post.ensure_authenticated",
+            AsyncMock(side_effect=SessionExpiredError()),
+        )
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_posts")
+        result = await tool_fn("React", mock_context)
+        assert result["error"] == "session_expired"
